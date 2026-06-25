@@ -891,7 +891,7 @@ class Session implements ISession {
         final enabled = config.navigate('nextflow.enable.configProcessNamesValidation', true) as boolean
         if( enabled ) {
             final names = ScriptMeta.allProcessNames()
-            final ver = "dsl${NF.dsl1 ?'1' :'2'}"
+            final ver = "dsl2"
             final processDefs = ScriptMeta.allProcessDefinitions()
             log.debug "Workflow process definitions [$ver]: ${processDefs.entrySet().collect{"${it.key} ${it.value}"}.join(', ')}"
             // Add unaliased process names to the resolved names map

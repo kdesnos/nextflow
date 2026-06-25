@@ -118,6 +118,16 @@ class ScriptMeta {
         return result
     }
 
+    static void addResolvedName(String name) {
+        def key = Map.entry(Paths.get("."), "")
+        def resolvedNameList = resolvedProcessNames.get(key)
+        if(!resolvedNameList){
+            resolvedNameList = new HashSet<String>()
+            resolvedProcessNames.put(key, resolvedNameList)
+        }
+        resolvedNameList.add(name)
+    }
+
     static void addResolvedName(String name, Path path, String baseName, String processName) {
         def resolvedNameList = resolvedProcessNames.get(Map.entry(path, baseName))
         if(!resolvedNameList){

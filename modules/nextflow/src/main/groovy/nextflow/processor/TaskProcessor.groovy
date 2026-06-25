@@ -579,8 +579,21 @@ class TaskProcessor {
             // Closure to get the (nested) list of param_type:param_name
             def getParamNamesAndTypes 
             getParamNamesAndTypes = { paramList ->
-                paramList.collect{param ->
-                    "${(param instanceof InParam)? param.getTypeName() : param.class.simpleName}:${(param !instanceof TupleInParam && param !instanceof TupleOutParam)? param.name : "[${getParamNamesAndTypes(param.getInner())}]"}"}.join(', ')
+                if (!paramList) return ''
+                paramList.collect { param ->
+                    def typeStr = (param instanceof InParam) ? param.getTypeName() : param.class.simpleName
+
+                    def nameStr = ''
+                    if (param instanceof TupleInParam || param instanceof TupleOutParam) {
+                        nameStr = "[${getParamNamesAndTypes(param.getInner())}]"
+                    } else if (param.metaClass.hasProperty(param, 'name')) {
+                        nameStr = param.name
+                    } else {
+                        nameStr = param.toString()
+                    }
+                    
+                    return "${typeStr}:${nameStr}"
+                }.join(', ')
             }
             // Print process name with associated input and outputs
             log.debug "Starting process > $name (${getParamNamesAndTypes(getConfig().getInputs())}) -> (${getParamNamesAndTypes(getConfig().getOutputs())})"
