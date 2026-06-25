@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2024, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@ package nextflow.cli
 
 import java.nio.file.Path
 import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 
 import com.beust.jcommander.IParameterValidator
 import com.beust.jcommander.Parameter
@@ -25,8 +27,8 @@ import com.beust.jcommander.Parameters
 import com.beust.jcommander.ParameterException
 import groovy.json.JsonOutput
 import groovy.transform.CompileStatic
-import groovy.transform.Memoized
 import groovy.util.logging.Slf4j
+import nextflow.BuildInfo
 import nextflow.config.control.ConfigParser
 import nextflow.config.formatter.ConfigFormattingVisitor
 import nextflow.exception.AbortOperationException
@@ -35,13 +37,15 @@ import nextflow.script.control.ParanoidWarning
 import nextflow.script.control.ScriptParser
 import nextflow.script.formatter.FormattingOptions
 import nextflow.script.formatter.ScriptFormattingVisitor
+import nextflow.script.parser.v2.ErrorListener
+import nextflow.script.parser.v2.ErrorSummary
+import nextflow.script.parser.v2.StandardErrorListener
+import nextflow.util.ClassLoaderFactory
 import nextflow.util.PathUtils
 import org.codehaus.groovy.control.SourceUnit
 import org.codehaus.groovy.control.messages.SyntaxErrorMessage
 import org.codehaus.groovy.control.messages.WarningMessage
 import org.codehaus.groovy.syntax.SyntaxException
-import org.fusesource.jansi.Ansi
-import org.fusesource.jansi.AnsiConsole
 /**
  * CLI sub-command LINT
  *
@@ -59,18 +63,24 @@ class CmdLint extends CmdBase {
         names = ['-exclude'],
         description = 'File pattern to exclude from error checking (can be specified multiple times)'
     )
-    List<String> excludePatterns = ['.git', '.nf-test', 'work']
+    List<String> excludePatterns = ['.git', '.lineage', '.nextflow', '.nf-test', 'nf-test.config', 'work']
+
+    @Parameter(
+        names = ['-files-from'],
+        description = 'Read list of paths to lint from a text file (one per line, use - for stdin)'
+    )
+    String filesFrom
 
     @Parameter(
         names = ['-o', '-output'],
-        description = 'Output mode for reporting errors: full, extended, concise, json',
+        description = 'Output mode for reporting errors: full, extended, concise, json, markdown',
         validateWith = OutputModeValidator
     )
     String outputMode = 'full'
 
     static class OutputModeValidator implements IParameterValidator {
 
-        private static final List<String> MODES = List.of('full', 'extended', 'concise', 'json')
+        private static final List<String> MODES = List.of('full', 'extended', 'concise', 'json', 'markdown')
 
         @Override
         void validate(String name, String value) {
@@ -78,6 +88,12 @@ class CmdLint extends CmdBase {
                 throw new ParameterException("Output mode must be one of $MODES (found: $value)")
         }
     }
+
+    @Parameter(
+        names = ['-project-dir'],
+        description = 'Path to project directory (default: .)'
+    )
+    String projectDir = '.'
 
     @Parameter(names = ['-format'], description = 'Format scripts and config files that have no errors')
     boolean formatting
@@ -109,7 +125,10 @@ class CmdLint extends CmdBase {
 
     @Override
     void run() {
-        if( !args )
+        // read input files from positional args and -files-from option
+        final inputs = getInputs(args, filesFrom)
+
+        if( !inputs )
             throw new AbortOperationException("Error: No input files were specified")
 
         if( spaces && tabs )
@@ -118,11 +137,17 @@ class CmdLint extends CmdBase {
         if( !spaces && !tabs )
             spaces = 4
 
-        scriptParser = new ScriptParser()
+        final baseDir = Path.of(projectDir)
+        final libDir = baseDir.resolve('lib')
+        final classLoader = ClassLoaderFactory.create([ libDir ])
+
+        scriptParser = new ScriptParser(baseDir, classLoader)
         configParser = new ConfigParser()
-        errorListener = outputMode == 'json'
-            ? new JsonErrorListener()
-            : new StandardErrorListener(outputMode, launcher.options.ansiLog)
+        errorListener = switch( outputMode ) {
+            case 'json' -> new JsonErrorListener()
+            case 'markdown' -> new MarkdownErrorListener()
+            default -> new StandardErrorListener(outputMode, launcher.options.ansiLog, launcher.options.quiet)
+        }
         formattingOptions = new FormattingOptions(spaces, !tabs, harhsilAlignment, false, sortDeclarations)
 
         errorListener.beforeAll()
@@ -130,9 +155,9 @@ class CmdLint extends CmdBase {
         // collect files to lint
         final List<File> files = []
 
-        for( final arg : args ) {
+        for( final input : inputs ) {
             PathUtils.visitFiles(
-                Path.of(arg),
+                Path.of(input),
                 (path) -> !PathUtils.isExcluded(path, excludePatterns),
                 (path) -> files.add(path.toFile()))
         }
@@ -162,6 +187,24 @@ class CmdLint extends CmdBase {
             throw new AbortOperationException()
     }
 
+    private static List<String> getInputs(List<String> args, String filesFrom) {
+        final List<String> result = []
+        result.addAll(args)
+
+        if( filesFrom ) {
+            final lines = filesFrom == '-'
+                ? System.in.readLines()
+                : Path.of(filesFrom).readLines()
+            for( final line : lines ) {
+                final trimmed = line.trim()
+                if( trimmed )
+                    result.add(trimmed)
+            }
+        }
+
+        return result
+    }
+
     private void parse(File file) {
         final name = file.getName()
         if( name.endsWith('.nf') )
@@ -189,35 +232,58 @@ class CmdLint extends CmdBase {
             .sorted(Comparator.comparing((SourceUnit source) -> source.getSource().getURI()))
             .forEach((source) -> {
                 final errorCollector = source.getErrorCollector()
-                if( errorCollector.hasErrors() || errorCollector.hasWarnings() )
+                final hasWarnings = (errorCollector.getWarnings() ?: []).stream()
+                    .anyMatch(warning -> warning !instanceof ParanoidWarning)
+                if( errorCollector.hasErrors() || hasWarnings )
                     printErrors(source)
                 if( errorCollector.hasErrors() )
                     summary.filesWithErrors += 1
                 else
                     summary.filesWithoutErrors += 1
+                if( hasWarnings )
+                    summary.filesWithWarnings += 1
+                else
+                    summary.filesWithoutWarnings += 1
             })
     }
 
     private void printErrors(SourceUnit source) {
         errorListener.beforeErrors()
 
-        final errorMessages = source.getErrorCollector().getErrors()
-        for( final message : errorMessages ) {
-            if( message instanceof SyntaxErrorMessage ) {
-                final cause = message.getCause()
+        final errors = source.getErrorCollector().getErrors() ?: []
+        errors.stream()
+            .filter(message -> message instanceof SyntaxErrorMessage)
+            .map(message -> ((SyntaxErrorMessage) message).getCause())
+            .sorted(ERROR_COMPARATOR)
+            .forEach((cause) -> {
                 errorListener.onError(cause, source.getName(), source)
                 summary.errors += 1
-            }
-        }
+            })
 
-        final warningMessages = source.getErrorCollector().getWarnings()
-        for( final warning : warningMessages ) {
-            if( warning instanceof ParanoidWarning )
-                continue
-            errorListener.onWarning(warning, source.getName(), source)
-        }
+        final warnings = source.getErrorCollector().getWarnings() ?: []
+        warnings.stream()
+            .filter(warning -> warning !instanceof ParanoidWarning)
+            .sorted(WARNING_COMPARATOR)
+            .forEach((warning) -> {
+                errorListener.onWarning(warning, source.getName(), source)
+                summary.warnings += 1
+            })
 
         errorListener.afterErrors()
+    }
+
+    private static final Comparator<SyntaxException> ERROR_COMPARATOR = (SyntaxException a, SyntaxException b) -> {
+        return a.getStartLine() != b.getStartLine()
+            ? a.getStartLine() - b.getStartLine()
+            : a.getStartColumn() - b.getStartColumn()
+    }
+
+    private static final Comparator<WarningMessage> WARNING_COMPARATOR = (WarningMessage w1, WarningMessage w2) -> {
+        final a = w1.getContext()
+        final b = w2.getContext()
+        return a.getStartLine() != b.getStartLine()
+            ? a.getStartLine() - b.getStartLine()
+            : a.getStartColumn() - b.getStartColumn()
     }
 
     private void format(File file) {
@@ -266,252 +332,12 @@ class CmdLint extends CmdBase {
 }
 
 
-class ErrorSummary {
-    int errors = 0
-    int filesWithErrors = 0
-    int filesWithoutErrors = 0
-    int filesFormatted = 0
-}
-
-
-interface ErrorListener {
-    void beforeAll()
-    void beforeFile(File file)
-    void beforeErrors()
-    void onError(SyntaxException error, String filename, SourceUnit source)
-    void onWarning(WarningMessage warning, String filename, SourceUnit source)
-    void afterErrors()
-    void beforeFormat(File file)
-    void afterAll(ErrorSummary summary)
-}
-
-
-@CompileStatic
-class StandardErrorListener implements ErrorListener {
-    private String mode
-    private boolean ansiLog
-
-    StandardErrorListener(String mode, boolean ansiLog) {
-        this.mode = mode
-        this.ansiLog = ansiLog
-    }
-
-    private Ansi ansi() {
-        final ansi = Ansi.ansi()
-        ansi.setEnabled(ansiLog)
-        return ansi
-    }
-
-    @Override
-    void beforeAll() {
-        final line = ansi().a("Linting Nextflow code..").newline()
-        AnsiConsole.out.print(line)
-        AnsiConsole.out.flush()
-    }
-
-    @Override
-    void beforeFile(File file) {
-        final line = ansi()
-            .cursorUp(1).eraseLine()
-            .a(Ansi.Attribute.INTENSITY_FAINT).a("Linting: ${file}")
-            .reset().newline().toString()
-        AnsiConsole.out.print(line)
-        AnsiConsole.out.flush()
-    }
-
-    private Ansi term
-
-    @Override
-    void beforeErrors() {
-        term = ansi().cursorUp(1).eraseLine()
-    }
-
-    @Override
-    void onError(SyntaxException error, String filename, SourceUnit source) {
-        term.bold().a(filename).reset()
-        term.a(":${error.getStartLine()}:${error.getStartColumn()}: ")
-        term = highlightString(error.getOriginalMessage(), term)
-        if( mode != 'concise' ) {
-            term.newline()
-            term = printCodeBlock(source, Range.of(error), term, Ansi.Color.RED)
-        }
-        term.newline()
-    }
-
-    @Override
-    void onWarning(WarningMessage warning, String filename, SourceUnit source) {
-        final token = warning.getContext().getRoot()
-        term.bold().a(filename).reset()
-        term.a(":${token.getStartLine()}:${token.getStartColumn()}: ")
-        term.fg(Ansi.Color.YELLOW).a(warning.getMessage()).fg(Ansi.Color.DEFAULT)
-        if( mode != 'concise' ) {
-            term.newline()
-            term = printCodeBlock(source, Range.of(warning), term, Ansi.Color.YELLOW)
-        }
-        term.newline()
-    }
-
-    private Ansi highlightString(String str, Ansi term) {
-        final matcher = str =~ /^(.*)([`'][^`']+[`'])(.*)$/
-        if( matcher.find() ) {
-            term.a(matcher.group(1))
-                .fg(Ansi.Color.CYAN).a(matcher.group(2)).fg(Ansi.Color.DEFAULT)
-                .a(matcher.group(3))
-        }
-        else {
-            term.a(str)
-        }
-        return term
-    }
-
-    private Ansi printCodeBlock(SourceUnit source, Range range, Ansi term, Ansi.Color color) {
-        final startLine = range.startLine()
-        final startColumn = range.startColumn()
-        final endLine = range.endLine()
-        final endColumn = range.endColumn()
-        final lines = getSourceText(source)
-
-        // get context window (up to 5 lines)
-        int padding = mode == 'extended' ? 2 : 0
-        int fromLine = Math.max(1, startLine - padding)
-        int toLine = Math.min(lines.size(), endLine + padding)
-        if( toLine - fromLine + 1 > 5 ) {
-            if( startLine <= 3 ) {
-                toLine = fromLine + 4
-            }
-            else if( endLine >= lines.size() - 2 ) {
-                fromLine = toLine - 4
-            }
-            else {
-                fromLine = startLine - 2
-                toLine = startLine + 2
-            }
-        }
-
-        for( int i = fromLine; i <= toLine; i++ ) {
-            String fullLine = lines[i - 1]
-            int start = (i == startLine) ? startColumn - 1 : 0
-            int end = (i == endLine) ? endColumn - 1 : fullLine.length()
-
-            // Truncate to max 70 characters
-            int maxLen = 70
-            int lineLen = fullLine.length()
-            int windowStart = 0
-            if( lineLen > maxLen ) {
-                if( start < maxLen - 10 )
-                    windowStart = 0
-                else if( end > lineLen - 10 )
-                    windowStart = lineLen - maxLen
-                else
-                    windowStart = start - 30
-            }
-
-            String line = fullLine.substring(windowStart, Math.min(lineLen, windowStart + maxLen))
-            int adjStart = Math.max(0, start - windowStart)
-            int adjEnd = Math.max(adjStart + 1, Math.min(end - windowStart, line.length()))
-
-            // Line number
-            term.fg(Ansi.Color.BLUE).a(String.format("%3d | ", i)).reset()
-
-            if( i == startLine ) {
-                // Print line with range highlighted
-                term.a(Ansi.Attribute.INTENSITY_FAINT).a(line.substring(0, adjStart)).reset()
-                term.fg(color).a(line.substring(adjStart, adjEnd)).reset()
-                term.a(Ansi.Attribute.INTENSITY_FAINT).a(line.substring(adjEnd)).reset().newline()
-
-                // Print carets underneath the range
-                String marker = ' ' * adjStart
-                String carets = '^' * Math.max(1, adjEnd - adjStart)
-                term.a("    | ")
-                    .fg(color).bold().a(marker + carets).reset().newline()
-            }
-            else {
-                term.a(Ansi.Attribute.INTENSITY_FAINT).a(line).reset().newline()
-            }
-        }
-
-        return term
-    }
-
-    @Memoized
-    private List<String> getSourceText(SourceUnit source) {
-        return source.getSource().getReader().readLines()
-    }
-
-    @Override
-    void afterErrors() {
-        // print extra newline since next file status will chomp back one
-        term.fg(Ansi.Color.DEFAULT).newline()
-        AnsiConsole.out.print(term)
-        AnsiConsole.out.flush()
-    }
-
-    @Override
-    void beforeFormat(File file) {
-        final line = ansi()
-            .cursorUp(1).eraseLine()
-            .a(Ansi.Attribute.INTENSITY_FAINT).a("Formatting: ${file}")
-            .reset().newline().toString()
-        AnsiConsole.out.print(line)
-        AnsiConsole.out.flush()
-    }
-
-    @Override
-    void afterAll(ErrorSummary summary) {
-        final term = ansi()
-        term.cursorUp(1).eraseLine().cursorUp(1).eraseLine()
-        // print extra newline if no code is being shown
-        if( mode == 'concise' )
-            term.newline()
-        term.bold().a("Nextflow linting complete!").reset().newline()
-        if( summary.filesWithErrors > 0 ) {
-            term.fg(Ansi.Color.RED).a(" ❌ ${summary.filesWithErrors} file${summary.filesWithErrors==1 ? '' : 's'} had ${summary.errors} error${summary.errors==1 ? '' : 's'}").newline()
-        }
-        if( summary.filesWithoutErrors > 0 ) {
-            term.fg(Ansi.Color.GREEN).a(" ✅ ${summary.filesWithoutErrors} file${summary.filesWithoutErrors==1 ? '' : 's'} had no errors")
-            if( summary.filesFormatted > 0 )
-                term.fg(Ansi.Color.BLUE).a(" (${summary.filesFormatted} formatted)")
-            term.newline()
-        }
-        if( summary.filesWithErrors == 0 && summary.filesWithoutErrors == 0 ) {
-            term.a(" No files found to process").newline()
-        }
-        AnsiConsole.out.print(term)
-        AnsiConsole.out.flush()
-    }
-
-    private static record Range(
-        int startLine,
-        int startColumn,
-        int endLine,
-        int endColumn
-    ) {
-        public static Range of(SyntaxException error) {
-            return new Range(
-                error.getStartLine(),
-                error.getStartColumn(),
-                error.getEndLine(),
-                error.getEndColumn(),
-            )
-        }
-
-        public static Range of(WarningMessage warning) {
-            final token = warning.getContext().getRoot()
-            return new Range(
-                token.getStartLine(),
-                token.getStartColumn(),
-                token.getStartLine(),
-                token.getStartColumn() + token.getText().length(),
-            )
-        }
-    }
-}
-
-
 @CompileStatic
 class JsonErrorListener implements ErrorListener {
 
     private List<Map> errors = []
+
+    private List<Map> warnings = []
 
     @Override
     void beforeAll() {
@@ -537,6 +363,13 @@ class JsonErrorListener implements ErrorListener {
 
     @Override
     void onWarning(WarningMessage warning, String filename, SourceUnit source) {
+        final token = warning.getContext().getRoot()
+        warnings.add([
+            filename: filename,
+            startLine: token.getStartLine(),
+            startColumn: token.getStartColumn(),
+            message: warning.getMessage()
+        ])
     }
 
     @Override
@@ -552,8 +385,157 @@ class JsonErrorListener implements ErrorListener {
         final result = [
             date: Instant.now().toString(),
             summary: summary,
-            errors: errors
+            errors: errors,
+            warnings: warnings
         ]
         println JsonOutput.prettyPrint(JsonOutput.toJson(result))
+    }
+}
+
+
+@CompileStatic
+class MarkdownErrorListener implements ErrorListener {
+
+    private static class LintEntry {
+        String filename
+        int startLine
+        int startColumn
+        int endLine
+        int endColumn
+        String message
+        SourceUnit source
+    }
+
+    private List<LintEntry> errors = []
+
+    private List<LintEntry> warnings = []
+
+    @Override
+    void beforeAll() {
+    }
+
+    @Override
+    void beforeFile(File file) {
+    }
+
+    @Override
+    void beforeErrors() {
+    }
+
+    @Override
+    void onError(SyntaxException error, String filename, SourceUnit source) {
+        errors.add(new LintEntry(
+            filename: filename,
+            startLine: error.getStartLine(),
+            startColumn: error.getStartColumn(),
+            endLine: error.getEndLine(),
+            endColumn: error.getEndColumn(),
+            message: error.getOriginalMessage(),
+            source: source
+        ))
+    }
+
+    @Override
+    void onWarning(WarningMessage warning, String filename, SourceUnit source) {
+        final token = warning.getContext().getRoot()
+        warnings.add(new LintEntry(
+            filename: filename,
+            startLine: token.getStartLine(),
+            startColumn: token.getStartColumn(),
+            endLine: token.getStartLine(),
+            endColumn: token.getStartColumn() + token.getText().length(),
+            message: warning.getMessage(),
+            source: source
+        ))
+    }
+
+    @Override
+    void afterErrors() {
+    }
+
+    @Override
+    void beforeFormat(File file) {
+    }
+
+    @Override
+    void afterAll(ErrorSummary summary) {
+        final sb = new StringBuilder()
+
+        // Header
+        sb.append('# Nextflow lint results\n\n')
+
+        // Metadata
+        final timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now().atOffset(ZoneOffset.UTC))
+        sb.append("- Generated: ${timestamp}\n")
+        sb.append("- Nextflow version: ${BuildInfo.version}\n")
+
+        // Summary line
+        final parts = []
+        if( summary.errors > 0 )
+            parts.add("${summary.errors} error${summary.errors == 1 ? '' : 's'}")
+        if( summary.warnings > 0 )
+            parts.add("${summary.warnings} warning${summary.warnings == 1 ? '' : 's'}")
+        if( parts.size() > 0 )
+            sb.append("- Summary: ${parts.join(', ')}\n")
+        else
+            sb.append("- Summary: No issues found\n")
+
+        // Sort entries by filename then position
+        final sortedErrors = errors.sort { a, b ->
+            final cmp = a.filename <=> b.filename
+            if( cmp != 0 ) return cmp
+            final lineCmp = a.startLine <=> b.startLine
+            if( lineCmp != 0 ) return lineCmp
+            return a.startColumn <=> b.startColumn
+        }
+
+        final sortedWarnings = warnings.sort { a, b ->
+            final cmp = a.filename <=> b.filename
+            if( cmp != 0 ) return cmp
+            final lineCmp = a.startLine <=> b.startLine
+            if( lineCmp != 0 ) return lineCmp
+            return a.startColumn <=> b.startColumn
+        }
+
+        // Errors section
+        if( sortedErrors.size() > 0 ) {
+            sb.append('\n## :x: Errors\n\n')
+            for( final entry : sortedErrors ) {
+                sb.append(formatEntry('Error', entry))
+            }
+        }
+
+        // Warnings section
+        if( sortedWarnings.size() > 0 ) {
+            sb.append('\n## :warning: Warnings\n\n')
+            for( final entry : sortedWarnings ) {
+                sb.append(formatEntry('Warning', entry))
+            }
+        }
+
+        println sb.toString().trim()
+    }
+
+    private String formatEntry(String type, LintEntry entry) {
+        final sb = new StringBuilder()
+        sb.append("- ${type}: `${entry.filename}:${entry.startLine}:${entry.startColumn}`: ${entry.message}\n\n")
+
+        // Add code context
+        final lines = entry.source.getSource().getReader().readLines()
+        if( entry.startLine > 0 && entry.startLine <= lines.size() ) {
+            final line = lines[entry.startLine - 1]
+            final startCol = Math.max(0, entry.startColumn - 1)
+            final endCol = Math.min(line.length(), Math.max(startCol + 1, entry.endColumn - 1))
+
+            sb.append("    ```nextflow\n")
+            sb.append("    ${line}\n")
+
+            // Add caret markers
+            final caretCount = Math.max(1, endCol - startCol)
+            sb.append("    ${' ' * startCol}${'^' * caretCount}\n")
+            sb.append("    ```\n\n")
+        }
+
+        return sb.toString()
     }
 }

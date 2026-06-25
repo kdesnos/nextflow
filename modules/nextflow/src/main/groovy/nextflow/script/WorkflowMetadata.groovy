@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2024, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ import nextflow.config.Manifest
 import nextflow.exception.WorkflowScriptErrorException
 import nextflow.trace.WorkflowStats
 import nextflow.util.Duration
-import org.codehaus.groovy.runtime.InvokerHelper
+import nextflow.util.TestOnly
 /**
  * Models workflow metadata properties and notification handler
  *
@@ -218,6 +218,12 @@ class WorkflowMetadata {
     FusionMetadata fusion
 
     /**
+     * Metadata specific to Seqera Platform, including:
+     * <li>workflowId: the Platform-assigned workflow identifier
+     */
+    PlatformMetadata platform
+
+    /**
      * The list of files that concurred to create the config object
      */
     List<Path> configFiles
@@ -292,11 +298,8 @@ class WorkflowMetadata {
        return config.isEnabled() ? config.getEngine() : null
     }
 
-    /**
-     * Only for testing purpose -- do not use
-     */
-    @PackageScope
-    WorkflowMetadata() {}
+    @TestOnly
+    protected WorkflowMetadata() {}
 
     /**
      * Implements the following idiom in the pipeline script:
@@ -347,16 +350,6 @@ class WorkflowMetadata {
         clone.resolveStrategy = Closure.DELEGATE_FIRST
 
         onErrorActions.add(clone)
-    }
-
-    /**
-     * Dynamic getter for workflow metadata attributes
-     *
-     * @param field
-     * @return The value associated to the specified field
-     */
-    def get(String field) {
-        InvokerHelper.getProperty(this,field)
     }
 
     /**
@@ -497,11 +490,8 @@ class WorkflowMetadata {
      */
     protected void safeMailNotification() {
         try {
-            final notifier = new WorkflowNotifier(
-                workflow: this,
-                config: session.config,
-                variables: NF.binding.variables )
-            notifier.sendNotification()
+            final notifier = new WorkflowNotifier(NF.binding.variables, this)
+            notifier.sendNotification(session.config)
         }
         catch (Exception e) {
             log.warn "Failed to deliver notification email -- See the log file for details", e
@@ -512,4 +502,14 @@ class WorkflowMetadata {
         session.statsObserver.getStats()
     }
 
+    PlatformMetadata getPlatform() {
+        if( platform!=null )
+            return platform
+        synchronized (this) {
+            if( platform!=null )
+                return platform
+            platform = new PlatformMetadata()
+        }
+        return platform
+    }
 }

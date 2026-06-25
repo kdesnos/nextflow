@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -61,29 +61,18 @@ class ConfigResolveTest extends Specification {
         errors[0].getStartLine() == 1
         errors[0].getStartColumn() == 36
         errors[0].getOriginalMessage() == '`process` is not defined'
-    }
 
-    def 'should report an error for an invalid dynamic config option' () {
         when:
-        def errors = check(
+        errors = check(
             '''\
-            report.file = { "report.html" }
+            process.clusterOptions = "--cpus $PROCESS_CPUS"
             '''
         )
         then:
         errors.size() == 1
         errors[0].getStartLine() == 1
-        errors[0].getStartColumn() == 1
-        errors[0].getOriginalMessage() == 'Dynamic config options are only allowed in the `process` scope'
-
-        when:
-        errors = check(
-            '''\
-            process.clusterOptions = { "--cpus ${task.cpus}" }
-            '''
-        )
-        then:
-        errors.size() == 0
+        errors[0].getStartColumn() == 34
+        errors[0].getOriginalMessage() == "`PROCESS_CPUS` is not defined (hint: use `env('...')` to access environment variable)"
     }
 
     def 'should report an error for an invalid config include' () {
@@ -119,6 +108,88 @@ class ConfigResolveTest extends Specification {
 
         cleanup:
         deleteDir(root)
+    }
+
+    def 'should check variables in a closure' () {
+        when:
+        def errors = check(
+            '''\
+            process {
+                clusterOptions = {
+                    args_list = []
+                    args_list.join(' ')
+                }()
+            }
+            '''
+        )
+        then:
+        errors.size() == 2
+        errors[0].getStartLine() == 3
+        errors[0].getStartColumn() == 9
+        errors[0].getOriginalMessage() == '`args_list` was assigned but not declared'
+        errors[1].getStartLine() == 4
+        errors[1].getStartColumn() == 9
+        errors[1].getOriginalMessage() == '`args_list` is not defined'
+
+        when:
+        errors = check(
+            '''\
+            process {
+                clusterOptions = {
+                    def args_list = []
+                    args_list.join(' ')
+                }()
+            }
+            '''
+        )
+        then:
+        errors.size() == 0
+    }
+
+    def 'should allow dynamic process directives to reference process inputs' () {
+        when:
+        def errors = check(
+            '''\
+            process {
+                ext.prefix = { "${meta.id}.filter1" }
+
+                publishDir = [
+                    path: { "${params.outdir}/${task.process.tokenize(':')[-1].tokenize('_')[0].toLowerCase()}" },
+                    mode: params.publish_dir_mode,
+                ]
+
+                publishDir = [
+                    path: { "${params.outdir}/imputation/${meta.tools}/samples/" },
+                    mode: params.publish_dir_mode,
+                ]
+            }
+            '''
+        )
+        then:
+        errors.size() == 0
+
+        when:
+        errors = check(
+            '''\
+            process {
+                ext.prefix = { "${meta.id}.filter1" }()
+            }
+            '''
+        )
+        then:
+        errors.size() == 1
+        errors[0].getStartLine() == 2
+        errors[0].getStartColumn() == 23
+        errors[0].getOriginalMessage() == '`meta` is not defined'
+
+        when:
+        errors = check(
+            '''\
+            executor.jobName = { "$task.name - $task.hash" }
+            '''
+        )
+        then:
+        errors.size() == 0
     }
 
 }

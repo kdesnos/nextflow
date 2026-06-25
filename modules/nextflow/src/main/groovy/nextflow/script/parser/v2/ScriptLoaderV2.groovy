@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2024, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,6 @@ import java.nio.file.Path
 
 import groovy.transform.CompileStatic
 import nextflow.Session
-import nextflow.cli.StandardErrorListener
 import nextflow.exception.ScriptCompilationException
 import nextflow.script.BaseScript
 import nextflow.script.ScriptBinding
@@ -30,7 +29,7 @@ import org.codehaus.groovy.control.CompilationFailedException
 import org.codehaus.groovy.control.SourceUnit
 import org.codehaus.groovy.runtime.InvokerHelper
 /**
- * Script parser/loader that uses the strict syntax.
+ * Script loader that uses the strict syntax parser.
  *
  * @author Ben Sherman <bentshermann@gmail.com>
  */
@@ -43,6 +42,8 @@ class ScriptLoaderV2 implements ScriptLoader {
 
     private boolean skipEntryFlow
 
+    private Object result
+
     ScriptLoaderV2(Session session) {
         this.session = session
     }
@@ -50,7 +51,7 @@ class ScriptLoaderV2 implements ScriptLoader {
     @Override
     ScriptLoaderV2 setEntryName(String name) {
         if( name )
-            throw new IllegalArgumentException("The `-entry` option is not supported with the strict syntax -- use a param to run a named workflow from the entry workflow")
+            throw new IllegalArgumentException("The `-entry` option is not supported with the strict parser -- use a param to run a named workflow from the entry workflow")
         return this
     }
 
@@ -70,7 +71,9 @@ class ScriptLoaderV2 implements ScriptLoader {
     }
 
     @Override
-    Object getResult() { null }
+    Object getResult() {
+        return result
+    }
 
     @Override
     ScriptLoaderV2 parse(Path scriptPath) {
@@ -84,14 +87,16 @@ class ScriptLoaderV2 implements ScriptLoader {
     }
 
     ScriptLoaderV2 parse(String scriptText) {
-        return parse0(scriptText, null)
+        parse0(scriptText, null)
+        return this
     }
 
     @Override
     ScriptLoaderV2 runScript() {
         assert session
         assert mainScript
-        mainScript.run()
+        // capture the last statement of the snippet or entry workflow (used for testing)
+        this.result = mainScript.run()
         return this
     }
 
@@ -105,29 +110,37 @@ class ScriptLoaderV2 implements ScriptLoader {
     private void parse0(String scriptText, Path scriptPath) {
         final compiler = getCompiler()
         try {
-            final result = scriptPath
+            final compileResult = scriptPath
                 ? compiler.compile(scriptPath.toFile())
                 : compiler.compile(scriptText)
 
-            mainScript = createScript(result.main(), session.binding, scriptPath, skipEntryFlow)
+            this.mainScript = createScript(compileResult.main(), session.binding, scriptPath, skipEntryFlow)
 
-            result.modules().forEach((path, clazz) -> {
+            compileResult.modules().forEach((path, clazz) -> {
                 createScript(clazz, new ScriptBinding(), path, true)
             })
+
+            for( final name : compileResult.processNames() )
+                ScriptMeta.addResolvedName(name)
         }
         catch( CompilationFailedException e ) {
-            final errorListener = new StandardErrorListener('full', false)
-            println()
-            errorListener.beforeErrors()
-            for( final message : compiler.getErrors() ) {
-                final cause = message.getCause()
-                final source = getSource(cause.getSourceLocator(), compiler)
-                final filename = getRelativePath(source, scriptPath)
-                errorListener.onError(cause, filename, source)
-            }
-            errorListener.afterErrors()
+            if( scriptPath )
+                printErrors(scriptPath)
             throw new ScriptCompilationException("Script compilation failed", e)
         }
+    }
+
+    private void printErrors(Path path) {
+        final errorListener = new StandardErrorListener('full', session.ansiLog)
+        println()
+        errorListener.beforeErrors()
+        for( final message : compiler.getErrors() ) {
+            final cause = message.getCause()
+            final source = getSource(cause.getSourceLocator(), compiler)
+            final filename = getRelativePath(source, path)
+            errorListener.onError(cause, filename, source)
+        }
+        errorListener.afterErrors()
     }
 
     private SourceUnit getSource(String sourceLocator, ScriptCompiler compiler) {
@@ -147,10 +160,11 @@ class ScriptLoaderV2 implements ScriptLoader {
         final script = InvokerHelper.createScript(clazz, binding)
         if( script instanceof BaseScript ) {
             final meta = ScriptMeta.get(script)
-            meta.setScriptPath(path)
+            if( path!=null ) {
+                meta.setScriptPath(path)
+                binding.setScriptPath(path)
+            }
             meta.setModule(module)
-            meta.validate()
-            binding.setScriptPath(path)
             binding.setSession(session)
             return script
         }
@@ -161,7 +175,7 @@ class ScriptLoaderV2 implements ScriptLoader {
 
     private ScriptCompiler getCompiler() {
         if( !compiler )
-            compiler = new ScriptCompiler(session.debug, session.classesDir, session.getClassLoader())
+            compiler = new ScriptCompiler(session.debug, session.classesDir, session.getClassLoader(), session.baseDir)
         return compiler
     }
 

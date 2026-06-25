@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2024, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,18 +18,14 @@ package nextflow.config.parser.v2
 
 import java.nio.file.Path
 
-import com.google.common.hash.Hashing
+import groovy.transform.CompileDynamic
 import groovy.transform.CompileStatic
-import nextflow.ast.NextflowXform
 import nextflow.config.ConfigParser
-import nextflow.config.StripSecretsXform
-import nextflow.config.parser.ConfigParserPluginFactory
+import nextflow.exception.ConfigParseException
 import nextflow.extension.Bolts
-import nextflow.util.Duration
-import nextflow.util.MemoryUnit
-import org.codehaus.groovy.control.CompilerConfiguration
-import org.codehaus.groovy.control.customizers.ASTTransformationCustomizer
-import org.codehaus.groovy.control.customizers.ImportCustomizer
+import nextflow.script.parser.v2.StandardErrorListener
+import org.codehaus.groovy.control.CompilationFailedException
+import org.codehaus.groovy.control.SourceUnit
 
 /**
  * The parser for Nextflow config files.
@@ -41,7 +37,9 @@ class ConfigParserV2 implements ConfigParser {
 
     private Map bindingVars = [:]
 
-    private Map paramVars = [:]
+    private Map cliParams = [:]
+
+    private Map configParams = [:]
 
     private boolean ignoreIncludes = false
 
@@ -51,9 +49,13 @@ class ConfigParserV2 implements ConfigParser {
 
     private boolean stripSecrets
 
+    private boolean ansiLog
+
     private List<String> appliedProfiles
 
-    private Set<String> parsedProfiles
+    private Set<String> declaredProfiles = []
+
+    private Map<String,Object> declaredParams = [:]
 
     private GroovyShell groovyShell
 
@@ -61,11 +63,6 @@ class ConfigParserV2 implements ConfigParser {
     ConfigParserV2 setProfiles(List<String> profiles) {
         this.appliedProfiles = profiles
         return this
-    }
-
-    @Override
-    Set<String> getProfiles() {
-        return parsedProfiles
     }
 
     @Override
@@ -87,8 +84,14 @@ class ConfigParserV2 implements ConfigParser {
     }
 
     @Override
-    ConfigParser setStripSecrets(boolean value) {
+    ConfigParserV2 setStripSecrets(boolean value) {
         this.stripSecrets = value
+        return this
+    }
+
+    @Override
+    ConfigParserV2 setAnsiLog(boolean value) {
+        this.ansiLog = value
         return this
     }
 
@@ -99,44 +102,83 @@ class ConfigParserV2 implements ConfigParser {
     }
 
     @Override
-    ConfigParserV2 setParams(Map vars) {
-        // deep clone the map to prevent side-effect
+    ConfigParserV2 setParams(Map params) {
+        // deep clone the map to prevent side effects with nested params
         // see https://github.com/nextflow-io/nextflow/issues/1923
-        this.paramVars = Bolts.deepClone(vars)
+        this.cliParams = Bolts.deepClone(params)
         return this
+    }
+
+    ConfigParserV2 setConfigParams(Map params) {
+        this.configParams = params
+        return this
+    }
+
+    @Override
+    Set<String> getDeclaredProfiles() {
+        return declaredProfiles
+    }
+
+    @Override
+    Map<String,Object> getDeclaredParams() {
+        return declaredParams
     }
 
     /**
      * Parse the given script as a string and return the configuration object
      *
      * @param text
-     * @param location
+     * @param path
      */
     @Override
     ConfigObject parse(String text) {
         parse(text, null)
     }
 
-    ConfigObject parse(String text, Path location) {
-        final groovyShell = getGroovyShell()
-        final script = (ConfigDsl) groovyShell.parse(text, uniqueClassName(text))
-        if( location )
-            script.setConfigPath(location)
-        script.setIgnoreIncludes(ignoreIncludes)
-        script.setRenderClosureAsString(renderClosureAsString)
-        if( location )
-            script.setConfigPath(location)
+    ConfigObject parse(String text, Path path) {
+        final compiler = getCompiler()
+        try {
+            final script = (ConfigDsl) compiler.compile(text, path)
+            script.setBinding(new Binding(bindingVars))
+            if( path )
+                script.setConfigPath(path)
+            script.setIgnoreIncludes(ignoreIncludes)
+            script.setRenderClosureAsString(renderClosureAsString)
+            script.setStrict(strict)
+            script.setStripSecrets(stripSecrets)
+            script.setParams(cliParams)
+            script.setConfigParams(configParams)
+            script.setProfiles(appliedProfiles)
+            script.run()
 
-        script.setBinding(new Binding(bindingVars))
-        script.setParams(paramVars)
-        script.setProfiles(appliedProfiles)
-        script.run()
+            final target = script.getTarget()
+            declaredProfiles.addAll(script.getDeclaredProfiles())
+            declaredParams.putAll(script.getDeclaredParams())
+            return Bolts.toConfigObject(target)
+        }
+        catch( CompilationFailedException e ) {
+            if( path )
+                printErrors(path)
+            throw new ConfigParseException("Config parsing failed", e)
+        }
+    }
 
-        final target = script.getTarget()
-        if( !target.params )
-            target.remove('params')
-        parsedProfiles = script.getParsedProfiles()
-        return Bolts.toConfigObject(target)
+    private void printErrors(Path path) {
+        final source = compiler.getSource()
+        final errorListener = new StandardErrorListener('full', ansiLog)
+        println()
+        errorListener.beforeErrors()
+        for( final message : compiler.getErrors() ) {
+            final cause = message.getCause()
+            final filename = getRelativePath(source, path)
+            errorListener.onError(cause, filename, source)
+        }
+        errorListener.afterErrors()
+    }
+
+    private String getRelativePath(SourceUnit source, Path path) {
+        final uri = source.getSource().getURI()
+        return path.getParent().relativize(Path.of(uri)).toString()
     }
 
     @Override
@@ -145,43 +187,17 @@ class ConfigParserV2 implements ConfigParser {
     }
 
     @Override
+    @CompileDynamic // required to support ProviderPath::getText() over NioExtensions::getText()
     ConfigObject parse(Path path) {
-        return parse(path.text, path)
+        return parse(path.getText(), path)
     }
 
-    private GroovyShell getGroovyShell() {
-        if( groovyShell )
-            return groovyShell
-        final classLoader = new GroovyClassLoader()
-        final config = new CompilerConfiguration()
-        config.setScriptBaseClass(ConfigDsl.class.getName())
-        config.setPluginFactory(new ConfigParserPluginFactory())
-        config.addCompilationCustomizers(new ASTTransformationCustomizer(ConfigToGroovyXform))
-        if( stripSecrets )
-            config.addCompilationCustomizers(new ASTTransformationCustomizer(StripSecretsXform))
-        if( renderClosureAsString )
-            config.addCompilationCustomizers(new ASTTransformationCustomizer(ClosureToStringXform))
-        config.addCompilationCustomizers(new ASTTransformationCustomizer(NextflowXform))
-        final importCustomizer = new ImportCustomizer()
-        importCustomizer.addImports( Duration.name )
-        importCustomizer.addImports( MemoryUnit.name )
-        config.addCompilationCustomizers(importCustomizer)
-        return groovyShell = new GroovyShell(classLoader, new Binding(), config)
-    }
+    private ConfigCompiler compiler
 
-    /**
-     * Creates a unique name for the config class in order to avoid collision
-     * with config DSL
-     *
-     * @param text
-     */
-    private String uniqueClassName(String text) {
-        def hash = Hashing
-                .sipHash24()
-                .newHasher()
-                .putUnencodedChars(text)
-                .hash()
-        return "_nf_config_$hash"
+    private ConfigCompiler getCompiler() {
+        if( !compiler )
+            compiler = new ConfigCompiler(renderClosureAsString, stripSecrets)
+        return compiler
     }
 
 }

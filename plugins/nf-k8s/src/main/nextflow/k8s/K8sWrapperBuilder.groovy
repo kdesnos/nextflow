@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2025, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,10 +34,5 @@ class K8sWrapperBuilder extends BashWrapperBuilder {
         super(task)
         this.headerScript = "NXF_CHDIR=${Escape.path(task.workDir)}"
     }
-
-    /**
-     * only for testing purpose -- do not use
-     */
-    protected K8sWrapperBuilder() {}
 
 }

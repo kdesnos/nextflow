@@ -1,4 +1,22 @@
+/*
+ * Copyright 2013-2026, Seqera Labs
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package nextflow.plugin
+
+import nextflow.util.CacheHelper
 
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
@@ -70,6 +88,32 @@ class PluginUpdaterTest extends Specification {
         folder?.deleteDir()
     }
 
+    def 'should detect already-installed pinned plugin from the on-disk store' () {
+        given:
+        def folder = Files.createTempDirectory('test')
+        and:
+        def remote = remoteRepository(folder.resolve('repo'), ['1.0.0'])
+        and:
+        def local = localCache(folder.resolve('plugins'), ['1.0.0'])
+        def manager = new LocalPluginManager(local)
+        def updater = new PluginUpdater(manager, local, remote, false)
+
+        expect:
+        // at prefetch time the local plugins have NOT been loaded into the manager yet
+        manager.getPlugin(PLUGIN_ID) == null
+        and:
+        // pinned + present in the store -> already installed, no remote metadata needed
+        updater.isAlreadyInstalled(PluginRef.parse('my-plugin@1.0.0'))
+        and:
+        // pinned but a different version is not installed
+        !updater.isAlreadyInstalled(PluginRef.parse('my-plugin@9.9.9'))
+        and:
+        // unpinned spec always needs remote metadata to resolve the latest release
+        !updater.isAlreadyInstalled(PluginRef.parse('my-plugin'))
+
+        cleanup:
+        folder?.deleteDir()
+    }
 
     def 'should update a plugin' () {
         given:
@@ -416,7 +460,7 @@ class PluginUpdaterTest extends Specification {
         then:
         matcher.matches() == EXPECTED
         !EXPECTED || matcher.group(1) == PLUGIN
-        
+
         where:
         FILE_NAME                               | EXPECTED  | PLUGIN
         'foo'                                   | false     | null
@@ -445,6 +489,18 @@ class PluginUpdaterTest extends Specification {
         Files.createDirectory(dir)
         versions.each { version -> createPlugin(dir, version) }
         return dir
+    }
+
+    // create a plugin 'hosted' at a digest url (eg an OCI registry)
+    static private MockPlugin createDigestPlugin(Path baseDir, String ver) {
+        // construct plugin as normal
+        def plugin = createPlugin(baseDir, ver)
+        def zipped = zipDir(plugin.path)
+        // but rename the zip file to a digest-based path
+        def digest = CacheHelper.hasher(zipped, CacheHelper.HashMode.SHA256).hash().toString()
+        plugin.zip = zipped.resolveSibling("sha256:$digest")
+        Files.move(zipped, plugin.zip)
+        return plugin
     }
 
     static private MockPlugin createPlugin(Path baseDir, String ver) {
@@ -514,5 +570,39 @@ class PluginUpdaterTest extends Specification {
         }
 
         return zipFilePath
+    }
+
+    def 'should prefetch plugin metadata when pulling plugins' () {
+        given:
+        def folder = Files.createTempDirectory('test')
+        def mockRepo = Mock(PrefetchUpdateRepository)
+        def remote = remoteRepository(folder.resolve('repo'), ['1.0.0', '2.0.0'])
+        def local = localCache(folder.resolve('plugins'), [])
+        def manager = new LocalPluginManager(local)
+        def updater = Spy(PluginUpdater, constructorArgs: [manager, local, remote, false])
+
+        // Replace repositories with our mock repo
+        updater.@repositories = [mockRepo]
+
+        and:
+        def pluginList = ['my-plugin@1.0.0', 'another-plugin@2.0.0']
+
+        when:
+        updater.pullPlugins(pluginList)
+
+        then:
+        // Verify prefetch is called with the correct plugin specs
+        1 * mockRepo.prefetch({ List<PluginRef> specs ->
+            specs.size() == 2 &&
+            specs[0].id == 'my-plugin' && specs[0].version == '1.0.0' &&
+            specs[1].id == 'another-plugin' && specs[1].version == '2.0.0'
+        })
+
+        and:
+        // Mock pullPlugin0 to prevent real implementation calls
+        2 * updater.pullPlugin0(_, _) >> null
+
+        cleanup:
+        folder?.deleteDir()
     }
 }

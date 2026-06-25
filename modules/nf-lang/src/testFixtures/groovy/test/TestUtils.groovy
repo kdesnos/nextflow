@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -90,7 +90,14 @@ class TestUtils {
         return errorCollector.getErrors().stream()
             .filter(e -> e instanceof SyntaxErrorMessage)
             .map(e -> e.cause)
+            .sorted(ERROR_COMPARATOR)
             .toList()
+    }
+
+    static final Comparator<SyntaxException> ERROR_COMPARATOR = (SyntaxException a, SyntaxException b) -> {
+        return a.getStartLine() != b.getStartLine()
+            ? a.getStartLine() - b.getStartLine()
+            : a.getStartColumn() - b.getStartColumn()
     }
 
     static List<SyntaxException> getErrors(List<Path> files, Compiler compiler) {

@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2024, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,9 +30,7 @@ import nextflow.config.ConfigClosurePlaceholder
 import nextflow.exception.ConfigParseException
 import nextflow.util.Duration
 import nextflow.util.MemoryUnit
-import spock.lang.Ignore
 import spock.lang.Specification
-
 /**
  *
  * @author Paolo Di Tommaso <paolo.ditommaso@gmail.com>
@@ -399,7 +397,7 @@ class ConfigParserV1Test extends Specification {
 
     }
 
-    def 'should return the set of visited block names' () {
+    def 'should return the set of declared profiles' () {
 
         given:
         def text = '''
@@ -417,13 +415,13 @@ class ConfigParserV1Test extends Specification {
         def slurper = new ConfigParserV1().setProfiles(['alpha'])
         slurper.parse(text)
         then:
-        slurper.getProfiles() == ['alpha','beta'] as Set
+        slurper.getDeclaredProfiles() == ['alpha','beta'] as Set
 
         when:
         slurper = new ConfigParserV1().setProfiles(['omega'])
         slurper.parse(text)
         then:
-        slurper.getProfiles() == ['alpha','beta'] as Set
+        slurper.getDeclaredProfiles() == ['alpha','beta'] as Set
     }
 
     def 'should disable includeConfig parsing' () {
@@ -483,7 +481,7 @@ class ConfigParserV1Test extends Specification {
         result.str1 instanceof String
         result.str2 instanceof GString
         result.closure1 instanceof Closure
-        result.map1.bar instanceof Closure
+        result.map1.bar instanceof Closure;
 
         when:
         result = new ConfigParserV1()
@@ -493,7 +491,7 @@ class ConfigParserV1Test extends Specification {
         result.str1 instanceof String
         result.str2 instanceof GString
         result.closure1 instanceof Closure
-        result.map1.bar instanceof Closure
+        result.map1.bar instanceof Closure;
 
         when:
         result = new ConfigParserV1()
@@ -510,8 +508,16 @@ class ConfigParserV1Test extends Specification {
     }
 
     def 'should handle extend mem and duration units' () {
-        ConfigObject result
-        def CONFIG = '''
+        given:
+        def folder = File.createTempDir()
+        def configFile = new File(folder,'nextflow.config')
+
+        new File(folder,'extra.config').text = """
+            mem4 = '8GB' as MemoryUnit
+            time4 = '24h' as Duration
+            """
+
+        configFile.text = '''
             mem1 = 1.GB
             mem2 = 1_000_000.toMemory()
             mem3 = MemoryUnit.of(2_000)
@@ -519,20 +525,23 @@ class ConfigParserV1Test extends Specification {
             time2 = 60_000.toDuration()
             time3 = Duration.of(120_000)
             flag = 10000 < 1.GB
-           '''
+
+            includeConfig 'extra.config'
+            '''
 
         when:
-        result = new ConfigParserV1()
-                .parse(CONFIG)
+        def result = new ConfigParserV1().parse(configFile)
         then:
         result.mem1 instanceof MemoryUnit
         result.mem1 == MemoryUnit.of('1 GB')
         result.mem2 == MemoryUnit.of(1_000_000)
         result.mem3 == MemoryUnit.of(2_000)
+        result.mem4 == MemoryUnit.of('8 GB')
         result.time1 instanceof Duration
         result.time1 == Duration.of('2 hours')
         result.time2 == Duration.of(60_000)
         result.time3 == Duration.of(120_000)
+        result.time4 == Duration.of('24h')
         result.flag == true
     }
 

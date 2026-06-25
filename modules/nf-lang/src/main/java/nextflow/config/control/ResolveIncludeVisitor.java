@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,15 +16,14 @@
 package nextflow.config.control;
 
 import java.net.URI;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 import nextflow.config.ast.ConfigIncludeNode;
 import nextflow.config.ast.ConfigNode;
 import nextflow.config.ast.ConfigVisitorSupport;
-import nextflow.script.control.Compiler;
 import nextflow.script.control.PhaseAware;
 import nextflow.script.control.Phases;
 import org.codehaus.groovy.ast.ASTNode;
@@ -44,23 +43,11 @@ public class ResolveIncludeVisitor extends ConfigVisitorSupport {
 
     private URI uri;
 
-    private Compiler compiler;
-
-    private Set<URI> changedUris;
-
     private List<SyntaxErrorMessage> errors = new ArrayList<>();
 
-    private boolean changed;
-
-    public ResolveIncludeVisitor(SourceUnit sourceUnit, Compiler compiler, Set<URI> changedUris) {
+    public ResolveIncludeVisitor(SourceUnit sourceUnit) {
         this.sourceUnit = sourceUnit;
         this.uri = sourceUnit.getSource().getURI();
-        this.compiler = compiler;
-        this.changedUris = changedUris;
-    }
-
-    public ResolveIncludeVisitor(SourceUnit sourceUnit, Compiler compiler) {
-        this(sourceUnit, compiler, null);
     }
 
     @Override
@@ -80,26 +67,30 @@ public class ResolveIncludeVisitor extends ConfigVisitorSupport {
             return;
         var source = node.source.getText();
         var includeUri = getIncludeUri(uri, source);
-        if( !isIncludeLocal(includeUri) || !isIncludeStale(includeUri) )
+        if( !isIncludeLocal(includeUri) )
             return;
-        changed = true;
-        var includeUnit = compiler.getSource(includeUri);
-        if( includeUnit == null ) {
+        if( !Files.exists(Path.of(includeUri)) ) {
             addError("Invalid include source: '" + includeUri.getPath() + "'", node);
             return;
         }
     }
 
     protected static URI getIncludeUri(URI uri, String source) {
+        // return source URI if it is already an absolute URI (e.g. http URL)
+        try {
+            var sourceUri = new URI(source);
+            if( sourceUri.getScheme() != null )
+                return sourceUri;
+        }
+        catch( Exception e ) {
+            // ignore
+        }
+        // otherwise, resolve the source path against the including URI
         return Path.of(uri).getParent().resolve(source).normalize().toUri();
     }
 
     protected static boolean isIncludeLocal(URI includeUri) {
         return "file".equals(includeUri.getScheme());
-    }
-
-    protected boolean isIncludeStale(URI includeUri) {
-        return changedUris == null || changedUris.contains(uri) || changedUris.contains(includeUri);
     }
 
     @Override
@@ -111,10 +102,6 @@ public class ResolveIncludeVisitor extends ConfigVisitorSupport {
 
     public List<SyntaxErrorMessage> getErrors() {
         return errors;
-    }
-
-    public boolean isChanged() {
-        return changed;
     }
 
     private class ResolveIncludeError extends SyntaxException implements PhaseAware {

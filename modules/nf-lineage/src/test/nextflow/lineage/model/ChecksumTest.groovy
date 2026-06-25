@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2025, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package nextflow.lineage.model
 
+import nextflow.lineage.model.v1beta1.Checksum
 import nextflow.util.CacheHelper
 import spock.lang.Specification
 

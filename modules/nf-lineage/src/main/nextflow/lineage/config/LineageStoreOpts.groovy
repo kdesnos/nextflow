@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2025, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,14 +17,24 @@
 package nextflow.lineage.config
 
 import groovy.transform.CompileStatic
+import groovy.transform.ToString
+import nextflow.config.spec.ConfigOption
+import nextflow.config.spec.ConfigScope
+import nextflow.script.dsl.Description
+
 /**
  * Model data store options
  *
  * @author Paolo Di Tommaso <paolo.ditommaso@gmail.com>
  */
+@ToString
 @CompileStatic
-class LineageStoreOpts {
+class LineageStoreOpts implements ConfigScope {
 
+    @ConfigOption
+    @Description("""
+        The location of the lineage metadata store (default: `./.lineage`).
+    """)
     final String location
 
     LineageStoreOpts(Map opts) {

@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2025, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -56,65 +56,6 @@ class DefaultLinHistoryLogTest extends Specification {
         def parsedRecord = LinHistoryRecord.parse(files[0].text)
         parsedRecord.sessionId == sessionId
         parsedRecord.runName == runName
-        parsedRecord.runLid == runLid
-    }
-
-    def "should return correct record for existing session"() {
-        given:
-        UUID sessionId = UUID.randomUUID()
-        String runName = "Run1"
-        String runLid = "lid://123"
-
-        and:
-        linHistoryLog.write(runName, sessionId, runLid)
-
-        when:
-        def record = linHistoryLog.getRecord(sessionId)
-        then:
-        record.sessionId == sessionId
-        record.runName == runName
-        record.runLid == runLid
-    }
-
-    def "should return null and warn if session does not exist"() {
-        expect:
-        linHistoryLog.getRecord(UUID.randomUUID()) == null
-    }
-
-    def "update should modify existing Lid for given session"() {
-        given:
-        UUID sessionId = UUID.randomUUID()
-        String runName = "Run1"
-        String runLidUpdated = "run-lid-updated"
-
-        and:
-        linHistoryLog.write(runName, sessionId, 'run-lid-initial')
-
-        when:
-        linHistoryLog.updateRunLid(sessionId, runLidUpdated)
-
-        then:
-        def files = historyFile.listFiles()
-        files.size() == 1
-        def parsedRecord = LinHistoryRecord.parse(files[0].text)
-        parsedRecord.runLid == runLidUpdated
-    }
-
-    def "update should do nothing if session does not exist"() {
-        given:
-        UUID existingSessionId = UUID.randomUUID()
-        UUID nonExistingSessionId = UUID.randomUUID()
-        String runName = "Run1"
-        String runLid = "lid://123"
-        and:
-        linHistoryLog.write(runName, existingSessionId, runLid)
-
-        when:
-        linHistoryLog.updateRunLid(nonExistingSessionId, "new-lid")
-        then:
-        def files = historyFile.listFiles()
-        files.size() == 1
-        def parsedRecord = LinHistoryRecord.parse(files[0].text)
         parsedRecord.runLid == runLid
     }
 

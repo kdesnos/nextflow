@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2025, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,8 +32,8 @@ class LinMetadataPath extends LinPath {
     private byte[] results
     private FileTime creationTime
 
-    LinMetadataPath(String resultsObject, FileTime creationTime, LinFileSystem fs, String path, String[] childs) {
-        super(fs, "${path}${childs ? '#'+ childs.join('.') : ''}")
+    LinMetadataPath(String resultsObject, FileTime creationTime, LinFileSystem fs, String path, String fragment) {
+        super(fs, "${path}${fragment ? '#'+ fragment : ''}")
         this.results = resultsObject.getBytes("UTF-8")
         this.creationTime = creationTime
     }

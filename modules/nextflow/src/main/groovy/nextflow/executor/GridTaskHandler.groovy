@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2024, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,13 +21,13 @@ import static nextflow.processor.TaskStatus.*
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 import java.time.temporal.ChronoUnit
-import java.util.function.Predicate
 import java.util.regex.Pattern
 
 import dev.failsafe.Failsafe
 import dev.failsafe.RetryPolicy
 import dev.failsafe.event.EventListener
 import dev.failsafe.event.ExecutionAttemptedEvent
+import dev.failsafe.function.CheckedPredicate
 import dev.failsafe.function.CheckedSupplier
 import groovy.transform.CompileStatic
 import groovy.transform.Memoized
@@ -44,6 +44,7 @@ import nextflow.processor.TaskRun
 import nextflow.trace.TraceRecord
 import nextflow.util.CmdLineHelper
 import nextflow.util.Duration
+import nextflow.util.TestOnly
 import nextflow.util.Throttle
 /**
  * Handles a job execution in the underlying grid platform
@@ -79,11 +80,9 @@ class GridTaskHandler extends TaskHandler implements FusionAwareTask {
 
     private Duration sanityCheckInterval
 
-    static private final Duration READ_TIMEOUT = Duration.of('270sec') // 4.5 minutes
-
     BatchCleanup batch
 
-    /** only for testing purpose */
+    @TestOnly
     protected GridTaskHandler() {}
 
     GridTaskHandler( TaskRun task, AbstractGridExecutor executor ) {
@@ -95,7 +94,7 @@ class GridTaskHandler extends TaskHandler implements FusionAwareTask {
         this.outputFile = task.workDir.resolve(TaskRun.CMD_OUTFILE)
         this.errorFile = task.workDir.resolve(TaskRun.CMD_ERRFILE)
         this.wrapperFile = task.workDir.resolve(TaskRun.CMD_RUN)
-        final duration = executor.session?.getExitReadTimeout(executor.name, READ_TIMEOUT) ?: READ_TIMEOUT
+        final duration = executor.config.getExitReadTimeout(executor.name)
         this.exitStatusReadTimeoutMillis = duration.toMillis()
         this.queue = task.config?.queue
         this.sanityCheckInterval = duration
@@ -126,9 +125,9 @@ class GridTaskHandler extends TaskHandler implements FusionAwareTask {
     }
 
     @Memoized
-    protected Predicate<? extends Throwable> retryCondition(String reasonPattern) {
+    protected CheckedPredicate<? extends Throwable> retryCondition(String reasonPattern) {
         final pattern = Pattern.compile(reasonPattern)
-        return new Predicate<Throwable>() {
+        return new CheckedPredicate<Throwable>() {
             @Override
             boolean test(Throwable failure) {
                 if( failure instanceof ProcessNonZeroExitStatusException ) {
@@ -142,16 +141,11 @@ class GridTaskHandler extends TaskHandler implements FusionAwareTask {
 
     protected <T> RetryPolicy<T> retryPolicy() {
 
-        final delay = executor.session.getConfigAttribute("executor.retry.delay", '500ms') as Duration
-        final maxDelay = executor.session.getConfigAttribute("executor.retry.maxDelay", '30s') as Duration
-        final jitter = executor.session.getConfigAttribute("executor.retry.jitter", '0.25') as double
-        final maxAttempts = executor.session.getConfigAttribute("executor.retry.maxAttempts", '3') as int
-        final reason = executor.session.getConfigAttribute("executor.submit.retry.reason", 'Socket timed out') as String
-
+        final retry = executor.config.retry
         final listener = new EventListener<ExecutionAttemptedEvent>() {
             @Override
             void accept(ExecutionAttemptedEvent event) throws Throwable {
-                final failure = event.getLastFailure()
+                final failure = event.getLastException()
                 if( failure instanceof ProcessNonZeroExitStatusException ) {
                     final failure0 = (ProcessNonZeroExitStatusException)failure
                     final msg = """\
@@ -169,10 +163,10 @@ class GridTaskHandler extends TaskHandler implements FusionAwareTask {
         }
 
         return RetryPolicy.<T>builder()
-                .handleIf(retryCondition(reason))
-                .withBackoff(delay.toMillis(), maxDelay.toMillis(), ChronoUnit.MILLIS)
-                .withMaxAttempts(maxAttempts)
-                .withJitter(jitter)
+                .handleIf(retryCondition(retry.reason))
+                .withBackoff(retry.delay.toMillis(), retry.maxDelay.toMillis(), ChronoUnit.MILLIS)
+                .withMaxAttempts(retry.maxAttempts)
+                .withJitter(retry.jitter)
                 .onFailedAttempt(listener)
                 .build()
     }
@@ -229,7 +223,7 @@ class GridTaskHandler extends TaskHandler implements FusionAwareTask {
         final launcher = fusionLauncher()
         final config = task.getContainerConfig()
         final containerOpts = task.config.getContainerOptions()
-        final cmd = FusionHelper.runWithContainer(launcher, config, task.getContainer(), containerOpts, submit)
+        final cmd = FusionHelper.runWithContainer(launcher, config, task.getContainer(), containerOpts, submit, task.getContainerPlatform())
         // create an inline script to launch the job execution
         return '#!/bin/bash\n' + submitDirective(task) + cmd + '\n'
     }

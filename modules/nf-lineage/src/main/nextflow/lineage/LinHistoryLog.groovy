@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2025, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,25 +31,10 @@ interface LinHistoryLog {
     void write(String name, UUID sessionId, String runLid)
 
     /**
-     * Updates the run LID for a given session ID.
-     *
-     * @param sessionId Workflow session ID.
-     * @param runLid Workflow run Lineage ID.
-     */
-    void updateRunLid(UUID sessionId, String runLid)
-
-    /**
      * Get the store records in the Lineage History Log.
      *
      * @return List of stored lineage history records.
      */
     List<LinHistoryRecord> getRecords()
-
-    /**
-     * Get the record for a given
-     * @param sessionId Workflow session ID.
-     * @return LinHistoryRecord for the given ID.
-     */
-    LinHistoryRecord getRecord(UUID sessionId)
 
 }

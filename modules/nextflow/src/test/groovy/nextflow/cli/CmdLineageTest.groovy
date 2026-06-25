@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2025, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -12,7 +12,6 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
  */
 
 package nextflow.cli
@@ -22,10 +21,10 @@ import nextflow.dag.MermaidHtmlRenderer
 import nextflow.lineage.DefaultLinHistoryLog
 import nextflow.lineage.LinHistoryRecord
 import nextflow.lineage.LinStoreFactory
-import nextflow.lineage.model.Checksum
-import nextflow.lineage.model.FileOutput
-import nextflow.lineage.model.Parameter
-import nextflow.lineage.model.TaskRun
+import nextflow.lineage.model.v1beta1.Checksum
+import nextflow.lineage.model.v1beta1.FileOutput
+import nextflow.lineage.model.v1beta1.Parameter
+import nextflow.lineage.model.v1beta1.TaskRun
 import nextflow.lineage.serde.LinEncoder
 import nextflow.plugin.Plugins
 import java.nio.file.Files
@@ -33,6 +32,8 @@ import java.time.OffsetDateTime
 import org.junit.Rule
 import spock.lang.Specification
 import test.OutputCapture
+
+import static test.TestHelper.filterLogNoise
 
 /**
  * CLI lineage Tests
@@ -79,12 +80,7 @@ class CmdLineageTest extends Specification {
         when:
             def lidCmd = new CmdLineage(launcher: launcher, args: ["list"])
             lidCmd.run()
-            def stdout = capture
-                .toString()
-                .readLines()// remove the log part
-                .findResults { line -> !line.contains('DEBUG') ? line : null }
-                .findResults { line -> !line.contains('INFO') ? line : null }
-                .findResults { line -> !line.contains('plugin') ? line : null }
+            def stdout = filterLogNoise(capture)
 
         then:
             stdout.size() == 2
@@ -107,13 +103,7 @@ class CmdLineageTest extends Specification {
         when:
         def lidCmd = new CmdLineage(launcher: launcher, args: ["list"])
         lidCmd.run()
-        def stdout = capture
-            .toString()
-            .readLines()// remove the log part
-            .findResults { line -> !line.contains('DEBUG') ? line : null }
-            .findResults { line -> !line.contains('INFO') ? line : null }
-            .findResults { line -> !line.contains('WARN') ? line : null }
-            .findResults { line -> !line.contains('plugin') ? line : null }
+        def stdout = filterLogNoise(capture, true)
 
         then:
         stdout.size() == 1
@@ -143,12 +133,7 @@ class CmdLineageTest extends Specification {
         when:
             def lidCmd = new CmdLineage(launcher: launcher, args: ["view", "lid://12345"])
             lidCmd.run()
-            def stdout = capture
-                .toString()
-                .readLines()// remove the log part
-                .findResults { line -> !line.contains('DEBUG') ? line : null }
-                .findResults { line -> !line.contains('INFO') ? line : null }
-                .findResults { line -> !line.contains('plugin') ? line : null }
+            def stdout = filterLogNoise(capture)
 
         then:
             stdout.size() == expectedOutput.readLines().size()
@@ -170,16 +155,11 @@ class CmdLineageTest extends Specification {
         when:
             def lidCmd = new CmdLineage(launcher: launcher, args: ["view", "lid://12345"])
             lidCmd.run()
-            def stdout = capture
-                .toString()
-                .readLines()// remove the log part
-                .findResults { line -> !line.contains('DEBUG') ? line : null }
-                .findResults { line -> !line.contains('INFO') ? line : null }
-                .findResults { line -> !line.contains('plugin') ? line : null }
+            def stdout = filterLogNoise(capture)
 
         then:
             stdout.size() == 1
-            stdout[0] == "Error loading lid://12345 - Lineage object 12345 not found"
+            stdout[0] == "Error loading lid://12345 - Lineage record 12345 not found"
 
         cleanup:
             folder?.deleteDir()
@@ -215,6 +195,7 @@ class CmdLineageTest extends Specification {
         entry = new TaskRun("u345-2346-1stw2", "foo",
                 new Checksum("abcde2345","nextflow","standard"),
                 'this is a script',
+                null,
                 [new Parameter( "val", "sample_id","ggal_gut"),
                 new Parameter("path","reads",["lid://45678/output.txt"])],
                 null, null, null, null, [:],[], null)
@@ -225,38 +206,32 @@ class CmdLineageTest extends Specification {
         entry = new TaskRun("u345-2346-1stw2", "bar",
                 new Checksum("abfs2556","nextflow","standard"),
                 'this is a script',
-                null,null, null, null, null, [:],[], null)
+                null, null, null, null, null, null, [:],[], null)
         lidFile5.text = encoder.encode(entry)
-        final network = """flowchart BT
-    lid://12345/file.bam@{shape: document, label: "lid://12345/file.bam"}
-    lid://123987/file.bam@{shape: document, label: "lid://123987/file.bam"}
-    lid://123987@{shape: process, label: "foo [lid://123987]"}
-    ggal_gut@{shape: document, label: "ggal_gut"}
-    lid://45678/output.txt@{shape: document, label: "lid://45678/output.txt"}
-    lid://45678@{shape: process, label: "bar [lid://45678]"}
-
-    lid://123987/file.bam -->lid://12345/file.bam
-    lid://123987 -->lid://123987/file.bam
-    ggal_gut -->lid://123987
-    lid://45678/output.txt -->lid://123987
-    lid://45678 -->lid://45678/output.txt
-"""
+        final network = """\
+            flowchart TB
+                lid://12345/file.bam["lid://12345/file.bam"]
+                lid://123987/file.bam["lid://123987/file.bam"]
+                lid://123987(["foo [lid://123987]"])
+                ggal_gut["ggal_gut"]
+                lid://45678/output.txt["lid://45678/output.txt"]
+                lid://45678(["bar [lid://45678]"])
+                lid://123987/file.bam --> lid://12345/file.bam
+                lid://123987 --> lid://123987/file.bam
+                ggal_gut --> lid://123987
+                lid://45678/output.txt --> lid://123987
+                lid://45678 --> lid://45678/output.txt""".stripIndent()
         final template = MermaidHtmlRenderer.readTemplate()
         def expectedOutput = template.replace('REPLACE_WITH_NETWORK_DATA', network)
 
         when:
         def lidCmd = new CmdLineage(launcher: launcher, args: ["render", "lid://12345/file.bam", outputHtml.toString()])
         lidCmd.run()
-        def stdout = capture
-            .toString()
-            .readLines()// remove the log part
-            .findResults { line -> !line.contains('DEBUG') ? line : null }
-            .findResults { line -> !line.contains('INFO') ? line : null }
-            .findResults { line -> !line.contains('plugin') ? line : null }
+        def stdout = filterLogNoise(capture)
 
         then:
         stdout.size() == 1
-        stdout[0] == "Linage graph for lid://12345/file.bam rendered in ${outputHtml}"
+        stdout[0] == "Rendered lineage graph for lid://12345/file.bam to ${outputHtml}"
         outputHtml.exists()
         outputHtml.text == expectedOutput
 
@@ -278,54 +253,14 @@ class CmdLineageTest extends Specification {
         def encoder = new LinEncoder().withPrettyPrint(true)
         def time = OffsetDateTime.now()
         def entry = new FileOutput("path/to/file",new Checksum("45372qe","nextflow","standard"),
-                "lid://123987/file.bam", "lid://12345", "lid://123987/", 1234, time, time, null)
+                "lid://123987/file.bam", "lid://12345", "lid://123987/", 1234, time, time, ['foo', 'bar'])
         def jsonSer = encoder.encode(entry)
-        def expectedOutput = jsonSer
+        def expectedOutput = 'lid://12345'
         lidFile.text = jsonSer
         when:
-        def lidCmd = new CmdLineage(launcher: launcher, args: ["view", "lid:///?type=FileOutput"])
+        def lidCmd = new CmdLineage(launcher: launcher, args: ["find", "type=FileOutput", "label=foo"])
         lidCmd.run()
-        def stdout = capture
-                .toString()
-                .readLines()// remove the log part
-                .findResults { line -> !line.contains('DEBUG') ? line : null }
-                .findResults { line -> !line.contains('INFO') ? line : null }
-                .findResults { line -> !line.contains('plugin') ? line : null }
-
-        then:
-        stdout.size() == expectedOutput.readLines().size()
-        stdout.join('\n') == expectedOutput
-
-        cleanup:
-        folder?.deleteDir()
-    }
-
-    def 'should show query results'(){
-        given:
-        def folder = Files.createTempDirectory('test').toAbsolutePath()
-        def configFile = folder.resolve('nextflow.config')
-        configFile.text = "lineage.enabled = true\nlineage.store.location = '$folder'".toString()
-        def lidFile = folder.resolve("12345/.data.json")
-        Files.createDirectories(lidFile.parent)
-        def launcher = Mock(Launcher){
-            getOptions() >> new CliOptions(config: [configFile.toString()])
-        }
-        def encoder = new LinEncoder().withPrettyPrint(true)
-        def time = OffsetDateTime.now()
-        def entry = new FileOutput("path/to/file",new Checksum("45372qe","nextflow","standard"),
-            "lid://123987/file.bam", "lid://12345", "lid://123987/", 1234, time, time, null)
-        def jsonSer = encoder.encode(entry)
-        def expectedOutput = jsonSer
-        lidFile.text = jsonSer
-        when:
-        def lidCmd = new CmdLineage(launcher: launcher, args: ["view", "lid:///?type=FileOutput"])
-        lidCmd.run()
-        def stdout = capture
-            .toString()
-            .readLines()// remove the log part
-            .findResults { line -> !line.contains('DEBUG') ? line : null }
-            .findResults { line -> !line.contains('INFO') ? line : null }
-            .findResults { line -> !line.contains('plugin') ? line : null }
+        def stdout = filterLogNoise(capture)
 
         then:
         stdout.size() == expectedOutput.readLines().size()

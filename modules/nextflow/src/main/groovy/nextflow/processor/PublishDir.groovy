@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2024, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -49,8 +49,10 @@ import nextflow.SysEnv
 import nextflow.extension.FilesEx
 import nextflow.file.FileHelper
 import nextflow.file.TagAwareFile
+import nextflow.trace.event.FilePublishEvent
 import nextflow.util.HashBuilder
 import nextflow.util.PathTrie
+import nextflow.util.RetryConfig
 /**
  * Implements the {@code publishDir} directory. It create links or copies the output
  * files of a given task to a user specified directory.
@@ -110,9 +112,9 @@ class PublishDir {
     private def tags
 
     /**
-     * Annotations to be associated to the target file
+     * Labels to be associated to the target file
      */
-    private Map annotations
+    private List<String> labels
 
     /**
      * The content type of the file. Currently only supported by AWS S3.
@@ -126,7 +128,7 @@ class PublishDir {
      */
     private String storageClass
 
-    private PublishRetryConfig retryConfig
+    private RetryConfig retryConfig
 
     private PathMatcher matcher
 
@@ -216,8 +218,8 @@ class PublishDir {
         if( params.tags != null )
             result.tags = params.tags
 
-        if( params.annotations != null )
-            result.annotations = params.annotations as Map
+        if( params.labels != null )
+            result.labels = params.labels as List<String>
 
         if( params.contentType instanceof Boolean )
             result.contentType = params.contentType
@@ -230,19 +232,10 @@ class PublishDir {
         return result
     }
 
-    protected Map getRetryOpts() {
-        def result = session.config.navigate('nextflow.publish.retryPolicy') as Map
-        if( result != null )
-            log.warn 'The `nextflow.publish` config scope has been renamed to `workflow.output`'
-        else
-            result = session.config.navigate('workflow.output.retryPolicy') as Map ?: Collections.emptyMap()
-        return result
-    }
-
     protected void apply0(Set<Path> files) {
         assert path
         // setup the retry policy config to be used
-        this.retryConfig = new PublishRetryConfig(getRetryOpts())
+        this.retryConfig = RetryConfig.config(session.config)
 
         createPublishDir()
         validatePublishMode()
@@ -401,7 +394,7 @@ class PublishDir {
         final listener = new EventListener<ExecutionAttemptedEvent>() {
             @Override
             void accept(ExecutionAttemptedEvent event) throws Throwable {
-                log.debug "Failed to publish file: ${source.toUriString()}; to: ${target.toUriString()} [${mode.toString().toLowerCase()}] -- attempt: ${event.attemptCount}; reason: ${event.lastFailure.message}"
+                log.debug "Failed to publish file: ${source.toUriString()}; to: ${target.toUriString()} [${mode.toString().toLowerCase()}] -- attempt: ${event.attemptCount}; reason: ${event.lastException.message}"
             }
         }
         final retryPolicy = RetryPolicy.builder()
@@ -433,7 +426,7 @@ class PublishDir {
             // see https://github.com/nextflow-io/nextflow/issues/2177
             if( !sameRealPath && checkSourcePathConflicts(destination))
                 return
-            
+
             if( !sameRealPath && shouldOverwrite(source, destination) ) {
                 FileHelper.deletePath(destination)
                 processFileImpl(source, destination)
@@ -589,7 +582,7 @@ class PublishDir {
     }
 
     protected void notifyFilePublish(Path destination, Path source=null) {
-        session.notifyFilePublish(destination, source, annotations)
+        session.notifyFilePublish(new FilePublishEvent(source, destination, labels))
     }
 
 }

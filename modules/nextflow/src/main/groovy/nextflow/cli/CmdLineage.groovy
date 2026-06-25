@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2025, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -12,7 +12,6 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
  */
 
 package nextflow.cli
@@ -40,11 +39,12 @@ class CmdLineage extends CmdBase implements UsageAware {
     private static final String NAME = 'lineage'
 
     interface LinCommand extends ExtensionPoint {
-        void log(ConfigMap config)
-        void describe(ConfigMap config, List<String> args)
+        void list(ConfigMap config)
+        void view(ConfigMap config, List<String> args)
         void render(ConfigMap config, List<String> args)
         void diff(ConfigMap config, List<String> args)
         void find(ConfigMap config, List<String> args)
+        void check(ConfigMap config, List<String> args)
     }
 
     interface SubCmd {
@@ -61,11 +61,12 @@ class CmdLineage extends CmdBase implements UsageAware {
     private ConfigMap config
 
     CmdLineage() {
-        commands << new CmdLog()
-        commands << new CmdDescribe()
+        commands << new CmdList()
+        commands << new CmdView()
         commands << new CmdRender()
         commands << new CmdDiff()
         commands << new CmdFind()
+        commands << new CmdCheck()
     }
 
     @Parameter(hidden = true)
@@ -148,7 +149,7 @@ class CmdLineage extends CmdBase implements UsageAware {
         throw new AbortOperationException(msg)
     }
 
-    class CmdLog implements SubCmd {
+    class CmdList implements SubCmd {
 
         @Override
         String getName() {
@@ -164,10 +165,9 @@ class CmdLineage extends CmdBase implements UsageAware {
         void apply(List<String> args) {
             if (args.size() != 0) {
                 println("ERROR: Incorrect number of parameters")
-                usage()
                 return
             }
-            operation.log(config)
+            operation.list(config)
         }
 
         @Override
@@ -177,7 +177,7 @@ class CmdLineage extends CmdBase implements UsageAware {
         }
     }
 
-    class CmdDescribe implements SubCmd{
+    class CmdView implements SubCmd{
 
         @Override
         String getName() {
@@ -192,11 +192,10 @@ class CmdLineage extends CmdBase implements UsageAware {
         void apply(List<String> args) {
             if (args.size() != 1) {
                 println("ERROR: Incorrect number of parameters")
-                usage()
                 return
             }
 
-            operation.describe(config, args)
+            operation.view(config, args)
         }
 
         @Override
@@ -219,7 +218,6 @@ class CmdLineage extends CmdBase implements UsageAware {
         void apply(List<String> args) {
             if (args.size() < 1 || args.size() > 2) {
                 println("ERROR: Incorrect number of parameters")
-                usage()
                 return
             }
 
@@ -247,7 +245,6 @@ class CmdLineage extends CmdBase implements UsageAware {
         void apply(List<String> args) {
             if (args.size() != 2) {
                 println("ERROR: Incorrect number of parameters")
-                usage()
                 return
             }
             operation.diff(config, args)
@@ -272,9 +269,8 @@ class CmdLineage extends CmdBase implements UsageAware {
         }
 
         void apply(List<String> args) {
-            if (args.size() != 1) {
+            if (args.size() < 1) {
                 println("ERROR: Incorrect number of parameters")
-                usage()
                 return
             }
             operation.find(config, args)
@@ -284,6 +280,32 @@ class CmdLineage extends CmdBase implements UsageAware {
         void usage() {
             println description
             println "Usage: nextflow $NAME $name <query>"
+        }
+
+    }
+
+    class CmdCheck implements SubCmd {
+
+        @Override
+        String getName() { 'check' }
+
+        @Override
+        String getDescription() {
+            return 'Checks the integrity of an lineage file path'
+        }
+
+        void apply(List<String> args) {
+            if (args.size() != 1) {
+                println("ERROR: Incorrect number of parameters")
+                return
+            }
+            operation.check(config, args)
+        }
+
+        @Override
+        void usage() {
+            println description
+            println "Usage: nextflow $NAME $name <lid-file>"
         }
 
     }

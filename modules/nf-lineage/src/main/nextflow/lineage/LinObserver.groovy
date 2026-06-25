@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2025, Seqera Labs
+ * Copyright 2013-2026, Seqera Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,13 @@
 
 package nextflow.lineage
 
+import nextflow.NextflowMeta
+import nextflow.extension.FilesEx
+import nextflow.lineage.exception.OutputRelativePathException
+import nextflow.module.ModuleInfo
+import nextflow.module.ModuleSpecFactory
+import nextflow.module.ModuleStorage
+
 import static nextflow.lineage.fs.LinPath.*
 
 import java.nio.file.Files
@@ -24,21 +31,22 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.time.OffsetDateTime
 
 import groovy.transform.CompileStatic
+import groovy.transform.Memoized
 import groovy.util.logging.Slf4j
 import nextflow.Session
-import nextflow.lineage.model.Annotation
-import nextflow.lineage.model.Checksum
-import nextflow.lineage.model.FileOutput
-import nextflow.lineage.model.DataPath
-import nextflow.lineage.model.Parameter
-import nextflow.lineage.model.TaskOutput
-import nextflow.lineage.model.Workflow
-import nextflow.lineage.model.WorkflowOutput
-import nextflow.lineage.model.WorkflowRun
+import nextflow.lineage.model.v1beta1.Checksum
+import nextflow.lineage.model.v1beta1.FileOutput
+import nextflow.lineage.model.v1beta1.DataPath
+import nextflow.lineage.model.v1beta1.Parameter
+import nextflow.lineage.model.v1beta1.TaskOutput
+import nextflow.lineage.model.v1beta1.Workflow
+import nextflow.lineage.model.v1beta1.WorkflowOutput
+import nextflow.lineage.model.v1beta1.WorkflowRun
 import nextflow.file.FileHelper
 import nextflow.file.FileHolder
-import nextflow.processor.TaskHandler
+import nextflow.processor.TaskHasher
 import nextflow.processor.TaskRun
+import nextflow.script.PlatformMetadata
 import nextflow.script.ScriptMeta
 import nextflow.script.params.BaseParam
 import nextflow.script.params.CmdEvalParam
@@ -54,8 +62,10 @@ import nextflow.script.params.StdInParam
 import nextflow.script.params.StdOutParam
 import nextflow.script.params.ValueInParam
 import nextflow.script.params.ValueOutParam
-import nextflow.trace.TraceObserver
-import nextflow.trace.TraceRecord
+import nextflow.trace.TraceObserverV2
+import nextflow.trace.event.FilePublishEvent
+import nextflow.trace.event.TaskEvent
+import nextflow.trace.event.WorkflowOutputEvent
 import nextflow.util.CacheHelper
 import nextflow.util.PathNormalizer
 import nextflow.util.SecretHelper
@@ -68,7 +78,10 @@ import nextflow.util.TestOnly
  */
 @Slf4j
 @CompileStatic
-class LinObserver implements TraceObserver {
+class LinObserver implements TraceObserverV2 {
+    private static Set<String> workflowMetadataPropertiesToRemove = Set.of(
+        "completed", "duration", "exitStatus", "errorMessage", "errorReport", "stats", "success" // Only existing at the end
+    )
     private static Map<Class<? extends BaseParam>, String> taskParamToValue = [
         (StdOutParam)  : "stdout",
         (StdInParam)   : "stdin",
@@ -94,11 +107,6 @@ class LinObserver implements TraceObserver {
         this.store = store
     }
 
-    @Override
-    void onFlowCreate(Session session) {
-        this.store.getHistoryLog().write(session.runName, session.uniqueId, '-')
-    }
-
     @TestOnly
     String getExecutionHash(){ executionHash }
 
@@ -118,12 +126,12 @@ class LinObserver implements TraceObserver {
             executionUri,
             new LinkedList<Parameter>()
         )
-        this.store.getHistoryLog().updateRunLid(session.uniqueId, executionUri)
+        this.store.getHistoryLog().write(session.runName, session.uniqueId, executionUri)
     }
 
     @Override
     void onFlowComplete(){
-        if (this.workflowOutput){
+        if(workflowOutput?.output ){
             workflowOutput.createdAt = OffsetDateTime.now()
             final key = executionHash + '#output'
             this.store.save(key, workflowOutput)
@@ -135,7 +143,7 @@ class LinObserver implements TraceObserver {
     }
 
     protected List<DataPath> collectScriptDataPaths(PathNormalizer normalizer) {
-        final allScripts = allScriptFiles()
+        final allScripts = allScriptFiles().sort()
         final result = new ArrayList<DataPath>(allScripts.size()+1)
         // the main script
         result.add( new DataPath(
@@ -166,7 +174,8 @@ class LinObserver implements TraceObserver {
             session.uniqueId.toString(),
             session.runName,
             getNormalizedParams(session.params, normalizer),
-            SecretHelper.hideSecrets(session.config.deepClone()) as Map
+            SecretHelper.hideSecrets(session.config.deepClone()) as Map,
+            collectWorkflowMetadata(normalizer)
         )
         final executionHash = CacheHelper.hasher(value).hash().toString()
         store.save(executionHash, value)
@@ -184,8 +193,8 @@ class LinObserver implements TraceObserver {
     }
 
     @Override
-    void onProcessComplete(TaskHandler handler, TraceRecord trace) {
-        storeTaskInfo(handler.task)
+    void onTaskComplete(TaskEvent event) {
+        storeTaskInfo(event.handler.task)
     }
 
     protected void storeTaskInfo(TaskRun task) {
@@ -250,28 +259,81 @@ class LinObserver implements TraceObserver {
 
     protected String storeTaskRun(TaskRun task, PathNormalizer normalizer) {
         final codeChecksum = Checksum.ofNextflow(session.stubRun ? task.stubSource : task.source)
-        final value = new nextflow.lineage.model.TaskRun(
+        final value = new nextflow.lineage.model.v1beta1.TaskRun(
             session.uniqueId.toString(),
             task.getName(),
             codeChecksum,
             task.script,
+            getTaskOutputEvals(task),
             task.inputs ? manageTaskInputParameters(task.inputs, normalizer) : null,
             task.isContainerEnabled() ? task.getContainerFingerprint() : null,
             normalizer.normalizePath(task.getCondaEnv()),
             normalizer.normalizePath(task.getSpackEnv()),
             task.config?.getArchitecture()?.toString(),
-            task.processor.getTaskGlobalVars(task),
-            task.processor.getTaskBinEntries(task.source).collect { Path p -> new DataPath(
+            getTaskGlobalVars(task),
+            getTaskBinEntries(task).collect { Path p -> new DataPath(
                 normalizer.normalizePath(p.normalize()),
                 Checksum.ofNextflow(p) )
             },
-            asUriString(executionHash)
+            asUriString(executionHash),
+            getTaskModuleId(task)
         )
 
         // store in the underlying persistence
         final key = task.hash.toString()
         store.save(key, value)
         return key
+    }
+
+    protected Map<String,Object> getTaskGlobalVars(TaskRun task) {
+        return new TaskHasher(task).getTaskGlobalVars()
+    }
+
+    protected String getTaskModuleId(TaskRun task) {
+        final ownerScript = task.processor?.getOwnerScript()
+        if( !ownerScript )
+            return null
+
+        final scriptMeta = ScriptMeta.get(ownerScript)
+        if( !scriptMeta || !scriptMeta.isModule() )
+            return null
+        return extractModuleInfo(scriptMeta.getScriptPath())
+    }
+
+    @Memoized
+    protected String extractModuleInfo(Path scriptPath) {
+        if( !scriptPath )
+            return null
+        final moduleDir = scriptPath.getParent()
+        if( !moduleDir )
+            return null
+        final manifestPath = moduleDir.resolve(ModuleStorage.MODULE_MANIFEST_FILE)
+        // presence of the `.module-info` marker is how we identify a directory as
+        // a Nextflow-managed remote module (vs. any directory that contains a meta.yml)
+        final infoPath = moduleDir.resolve(ModuleInfo.MODULE_INFO_FILE)
+        if( !manifestPath.exists() || !infoPath.exists() )
+            return null
+        try {
+            final spec = ModuleSpecFactory.fromYaml(manifestPath)
+            if( !spec.name || !spec.version ) {
+                log.debug("Incomplete module manifest '${manifestPath.toUriString()}': missing name or version")
+                return null
+            }
+            return "${spec.name}@${spec.version}".toString()
+        }
+        catch( Exception e ) {
+            log.warn("Unable to read module manifest '${manifestPath.toUriString()}': ${e.message}")
+            return null
+        }
+    }
+
+    protected List<Path> getTaskBinEntries(TaskRun task) {
+        return new TaskHasher(task).getTaskBinEntries(task.source)
+    }
+
+    protected Map<String,String> getTaskOutputEvals(TaskRun task) {
+        final outEvals = task.getOutputEvals()
+        return outEvals ? new LinkedHashMap<String,String>(outEvals) : null
     }
 
     protected String storeTaskOutput(TaskRun task, Path path) {
@@ -301,8 +363,8 @@ class LinObserver implements TraceObserver {
         return task.hash.toString() + SEPARATOR + rel
     }
 
-    protected String getWorkflowOutputKey(Path destination) {
-        final rel = getWorkflowRelative(destination)
+    protected String getWorkflowOutputKey(Path target) {
+        final rel = getWorkflowRelative(target)
         return executionHash + SEPARATOR + rel
     }
 
@@ -342,18 +404,16 @@ class LinObserver implements TraceObserver {
     }
 
     @Override
-    void onFilePublish(Path destination, Path source) {
-        storePublishedFile(destination, source)
-    }
-
-    protected void storePublishedFile(Path destination, Path source = null, Map annotations = null){
+    void onFilePublish(FilePublishEvent event) {
         try {
-            final checksum = Checksum.ofNextflow(destination)
-            final key = getWorkflowOutputKey(destination)
-            final sourceReference = source ? getSourceReference(source) : asUriString(executionHash)
-            final attrs = readAttributes(destination)
+            final checksum = Checksum.ofNextflow(event.target)
+            final key = getWorkflowOutputKey(event.target)
+            final sourceReference = event.source
+                ? getSourceReference(event.source)
+                : asUriString(executionHash)
+            final attrs = readAttributes(event.target)
             final value = new FileOutput(
-                destination.toUriString(),
+                event.target.toUriString(),
                 checksum,
                 sourceReference,
                 asUriString(executionHash),
@@ -361,19 +421,15 @@ class LinObserver implements TraceObserver {
                 attrs.size(),
                 LinUtils.toDate(attrs?.creationTime()),
                 LinUtils.toDate(attrs?.lastModifiedTime()),
-                convertAnnotations(annotations))
+                event.labels)
             store.save(key, value)
-        } catch (Throwable e) {
-            log.warn("Unexpected error storing published file '${destination.toUriString()}' for workflow '${executionHash}'", e)
         }
-    }
-
-    private static List<Annotation> convertAnnotations(Map annotations){
-        if( !annotations )
-            return null
-        final converted = new LinkedList<Annotation>()
-        annotations.forEach { Object key, Object value -> converted.add(new Annotation(key.toString(), value)) }
-        return converted
+        catch (OutputRelativePathException ignored ){
+            log.warn1("Lineage for workflow output is not supported by publishDir directive")
+        }
+        catch (Throwable e) {
+            log.warn("Unexpected error storing published file '${event.target.toUriString()}' for workflow '${executionHash}'", e)
+        }
     }
 
     String getSourceReference(Path source){
@@ -387,13 +443,10 @@ class LinObserver implements TraceObserver {
     }
 
     @Override
-    void onFilePublish(Path destination){
-        storePublishedFile (destination)
-    }
-
-    @Override
-    void onWorkflowPublish(String name, Object value){
-        workflowOutput.output.add(new Parameter(getParameterType(value), name, convertPathsToLidReferences(value)))
+    void onWorkflowOutput(WorkflowOutputEvent event) {
+        final type = getParameterType(event.value)
+        final value = convertPathsToLidReferences(event.index ?: event.value)
+        workflowOutput.output.add(new Parameter(type, event.name, value))
     }
 
     protected static String getParameterType(Object param) {
@@ -402,11 +455,11 @@ class LinObserver implements TraceObserver {
         // return generic types
         if( param instanceof Path )
             return Path.simpleName
-        if (param instanceof CharSequence)
+        if( param instanceof CharSequence )
             return String.simpleName
         if( param instanceof Collection )
             return Collection.simpleName
-        if( param instanceof Map)
+        if( param instanceof Map )
             return Map.simpleName
         if( param==null ) {
             log.debug "Unexpected lineage param type null"
@@ -425,22 +478,15 @@ class LinObserver implements TraceObserver {
                 return value
             }
         }
-
         if( value instanceof Collection ) {
             return value.collect { el -> convertPathsToLidReferences(el) }
         }
-
         if( value instanceof Map ) {
             return value
                 .findAll { k, v -> v != null }
                 .collectEntries { k, v -> Map.entry(k, convertPathsToLidReferences(v)) }
         }
         return value
-    }
-
-    @Override
-    void onFilePublish(Path destination, Path source, Map annotations){
-        storePublishedFile( destination, source, annotations)
     }
 
     /**
@@ -456,14 +502,17 @@ class LinObserver implements TraceObserver {
             if (path.startsWith(outputDirAbs)) {
                 return outputDirAbs.relativize(path).toString()
             }
-            throw new IllegalArgumentException("Cannot access relative path for workflow output '${path.toUriString()}'")
+            log.debug("Cannot get relative path for workflow output '${path.toUriString()}'")
+            throw new OutputRelativePathException()
         }
         final pathAbs = path.toAbsolutePath()
         if (pathAbs.startsWith(outputDirAbs)) {
             return outputDirAbs.relativize(pathAbs).toString()
         }
-        if (path.normalize().getName(0).toString() == "..")
-            throw new IllegalArgumentException("Cannot access relative path for workflow output '${path.toUriString()}'")
+        if (path.normalize().getName(0).toString() == "..") {
+            log.debug("Cannot get relative path for workflow output '${path.toUriString()}'")
+            throw new OutputRelativePathException()
+        }
         return path.normalize().toString()
     }
 
@@ -481,12 +530,37 @@ class LinObserver implements TraceObserver {
     private List<Object> manageFileInParam(List<FileHolder> files, PathNormalizer normalizer){
         final paths = new LinkedList<Object>();
         for( FileHolder it : files ) {
-            final ref = getSourceReference(it.storePath)
+            final path = it.sourcePath ?: it.storePath
+            final ref = getSourceReference(path)
             paths.add(ref ?: new DataPath(
-                normalizer.normalizePath(it.storePath),
-                Checksum.ofNextflow(it.storePath))
+                normalizer.normalizePath(path),
+                Checksum.ofNextflow(path))
             )
         }
         return paths
+    }
+
+    /**
+     * Collects lineage data from workflow metadata applying the following transformations:
+     *  - Normalizes paths against the original remote URL, or work directory and convert to URI strings
+     *  - Remove transient properties (completed, duration, exitStatus, errorMessage, errorReport, stats, success)
+     *  - Convert Nextflow metadata as Json Map
+     * @param normalizer
+     * @return Map with workflow metadata or null when error
+     */
+    private Map collectWorkflowMetadata(PathNormalizer normalizer) {
+        try {
+            def metadata = session.workflowMetadata.toMap()
+                .collectEntries { it.value instanceof Path ? [it.key, FilesEx.toUriString(it.value as Path) ] : [it.key, it.value] }
+            metadata.removeAll {it.key.toString() in workflowMetadataPropertiesToRemove }
+            if( metadata.containsKey("nextflow") )
+                metadata["nextflow"] = (metadata["nextflow"] as NextflowMeta).toJsonMap()
+            if( metadata.containsKey("configFiles") )
+                metadata["configFiles"] = (metadata["configFiles"] as List<Path>).collect {normalizer.normalizePath(it)}
+            return metadata
+        } catch( Throwable e) {
+            log.debug("Error creating metadata", e)
+            return null
+        }
     }
 }
