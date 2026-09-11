@@ -106,7 +106,9 @@ class TraceRecord implements Serializable {
             hostname: 'str',
             cpu_model:  'str',
             accelerator: 'num',
-            accelerator_type: 'str'
+            accelerator_type: 'str',
+            input_size_mb: 'num',       // Modified by Kevin Kuzu
+            input_val_data: 'str'       // 
     ]
 
     static public Map<String,Closure<String>> FORMATTER = [

@@ -43,7 +43,9 @@ class TraceConfig implements ConfigScope {
         'peak_rss',
         'peak_vmem',
         'rchar',
-        'wchar'
+        'wchar',
+        'input_size_mb',     // Modified by Kevin KUZU
+        'input_val_data'     //
     )
 
     @ConfigOption

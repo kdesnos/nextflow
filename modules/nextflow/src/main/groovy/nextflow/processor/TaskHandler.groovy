@@ -227,6 +227,66 @@ abstract class TaskHandler {
         record.accelerator = task.config.getAccelerator()?.request
         record.accelerator_type = task.config.getAccelerator()?.type
 
+        // --- DEBUT BLOC UNIVERSEL ---
+        long totalInputBytes = 0
+        List<String> valStrings = []
+
+        def processInputValue
+        processInputValue = { String inputLabel, Object v ->
+            if (v == null) {
+                if (inputLabel != "\$") valStrings << "${inputLabel}=null"
+            }
+            else if (v instanceof java.nio.file.Path) {
+                if (java.nio.file.Files.isRegularFile(v)) {
+                    totalInputBytes += java.nio.file.Files.size(v)
+                }
+            }
+            else if (v instanceof java.io.File) {
+                if (v.isFile()) {
+                    totalInputBytes += v.length()
+                }
+            }
+            else if (v.hasProperty('storePath') || v.hasProperty('sourcePath')) {
+                def p = v.hasProperty('storePath') && v.storePath ? v.storePath : v.sourcePath
+                if (p instanceof java.nio.file.Path && java.nio.file.Files.isRegularFile(p)) {
+                    totalInputBytes += java.nio.file.Files.size(p)
+                } else if (p instanceof java.io.File && p.isFile()) {
+                    totalInputBytes += p.length()
+                }
+            }
+            else if (v instanceof Collection || v?.getClass()?.isArray()) {
+                v.each { item -> processInputValue(inputLabel, item) }
+            }
+            else if (v instanceof Map) {
+                v.each { key, item -> processInputValue("${inputLabel}.${key}", item) }
+            }
+            else if (v instanceof Number || v instanceof String || v instanceof Boolean || v instanceof Character) {
+                if (inputLabel != "\$") { // On ignore le control channel interne de Nextflow
+                    valStrings << "${inputLabel}=${v}"
+                }
+            }
+            else {
+                if (inputLabel != "\$") {
+                    valStrings << "${inputLabel}=TYPE_UNKNOWN[${v?.getClass()?.simpleName}]"
+                }
+            }
+        }
+
+        if (task.inputs) {
+            task.inputs.each { k, val ->
+                try {
+                    String paramName = (k.hasProperty('name') && k.name) ? k.name.toString() : k.toString()
+                    processInputValue(paramName, val)
+                } 
+                catch (Exception e) {
+                }
+            }
+        }
+
+        record.input_size_mb = totalInputBytes > 0 ? (totalInputBytes / 1048576.0).round(2) : 0
+        record.input_val_data = valStrings ? valStrings.unique().join(" | ") : "-"
+        // --- FIN BLOC UNIVERSEL ---
+
         if( isCompleted() ) {
             record.error_action = task.errorAction?.toString()
 
